@@ -1,6 +1,8 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <syslog.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
 
 int main(int argc, char* argv[]){
 
@@ -18,20 +20,36 @@ int main(int argc, char* argv[]){
     char* writefile = argv[1];
     char* writestr = argv[2];
 
-    FILE* fp;
-    fp = fopen(writefile, "w");
-    if (fp == NULL){
+    int fd;
+    fd = open(writefile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1){ // error
         syslog(LOG_ERR, "Error opening file for write: %s", writefile);
         return 1;
     }
 
     syslog(LOG_DEBUG, "Writing %s to %s", writestr, writefile);
-    int rc = fprintf(fp, "%s\n", writestr);
-    if (rc < 0){
+    
+    ssize_t nwrite1, nwrite2;
+    nwrite1 = write(fd, writestr, strlen(writestr));
+    nwrite2 = write(fd, "\n", 1);
+    if (nwrite1 == -1 || nwrite2 == -1){ // error
         syslog(LOG_ERR, "Error writing to file for write: %s", writefile);
         return 1;
     }
 
-    fclose(fp);
+    int rc_sync;
+    rc_sync = fsync(fd);
+    if (rc_sync == -1){ // error
+        syslog(LOG_ERR, "Error flushing file: %s", writefile);
+        return 1;
+    }
+
+    int rc_close;
+    rc_close = close(fd);
+    if (rc_close == -1){ // error
+        syslog(LOG_ERR, "Error closing file: %s", writefile);
+        return 1;
+    }
+
     return 0;
 }
