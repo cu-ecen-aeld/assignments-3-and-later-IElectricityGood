@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +21,13 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
-    return true;
+    int rc = system(cmd);
+    if (rc == 0){
+        return true;
+    }
+    else{
+        return false;
+    }
 }
 
 /**
@@ -47,7 +57,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    // command[count] = command[count];
 
 /*
  * TODO:
@@ -58,10 +68,30 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    bool retval = false;
+
+    int status;
+    pid_t pid;
+    pid = fork();
+    if (pid == 0){ // pid == 0 for child process
+        execv(command[0], command);
+        // execv only returns if an error occurred
+        exit(-1);
+    }
+    else if (pid != -1) { // parent process
+        int rc = waitpid(pid, &status, 0);
+        // printf("rc = %d, status = %d, wexitstatus = %d\n", rc, status, WEXITSTATUS(status));
+        if (rc == pid){ // not an error
+            if (WIFEXITED(status)){ // child terminated normally
+                if (WEXITSTATUS(status) == 0){ // child returned zero
+                    retval = true;
+                }
+            }
+        }
+    }
 
     va_end(args);
-
-    return true;
+    return retval;
 }
 
 /**
@@ -93,7 +123,37 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
-    va_end(args);
+    bool retval = false;
 
-    return true;
+    int status;
+    pid_t pid;
+
+    int fd = open(outputfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+
+    if (fd != -1) {
+        pid = fork();
+        if (pid == 0){ // pid == 0 for child process
+            if (dup2(fd, STDOUT_FILENO) != -1){
+                close(fd);
+                execv(command[0], command);
+                // execv only returns if an error occurred
+                exit(-1);
+            }
+        }
+        else if (pid != -1) { // parent process
+            close(fd);
+            int rc = waitpid(pid, &status, 0);
+            // printf("rc = %d, status = %d, wexitstatus = %d\n", rc, status, WEXITSTATUS(status));
+            if (rc == pid){ // not an error
+                if (WIFEXITED(status)){ // child terminated normally
+                    if (WEXITSTATUS(status) == 0){ // child returned zero
+                        retval = true;
+                    }
+                }
+            }
+        }
+    }
+
+    va_end(args);
+    return retval;
 }
