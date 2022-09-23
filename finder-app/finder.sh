@@ -21,5 +21,8 @@ fi
 searchstr=$2
 
 X=$(find $filesdir -type f | wc -l)
-Y=$(grep -r --binary-files=without-match $searchstr $filesdir | wc -l)
+
+# target grep does not support --binary-files=without-match option
+# Y=$(grep -r --binary-files=without-match $searchstr $filesdir | wc -l)
+Y=$(grep -r $searchstr $filesdir | wc -l)
 echo "The number of files are $X and the number of matching lines are $Y"
