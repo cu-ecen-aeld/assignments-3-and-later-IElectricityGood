@@ -48,11 +48,14 @@ fi
 for i in $( seq 1 $NUMFILES)
 do
 	# ./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
-	./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	# ./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"	# assumes writer is in PATH
 done
 
-OUTPUTSTRING=$(/bin/sh ./finder.sh "$WRITEDIR" "$WRITESTR")
+# OUTPUTSTRING=$(/bin/sh ./finder.sh "$WRITEDIR" "$WRITESTR")
+OUTPUTSTRING=$(finder.sh "$WRITEDIR" "$WRITESTR")	# assumes finder.sh is in PATH, and shebang is configured to /bin/sh
 
+echo ${OUTPUTSTRING} > /tmp/assignment4-result.txt
 set +e
 echo ${OUTPUTSTRING} | grep "${MATCHSTR}"
 if [ $? -eq 0 ]; then
