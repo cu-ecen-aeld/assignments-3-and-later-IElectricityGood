@@ -31,6 +31,7 @@ struct file_params glob_params;
 
 bool caught_sigint = false;
 bool caught_sigterm = false;
+bool is_daemon = false;
 
 void signal_handler(int signum); // https://man7.org/linux/man-pages/man2/sigaction.2.html
 void cleanup(struct file_params* fp);
@@ -43,6 +44,11 @@ int main(int argc, char* argv[]){
     int conn_count;
     bool got_newline;
 
+    if (argc == 2){
+        if (strncmp(argv[1], "-d", 20) == 0){
+            is_daemon = true;
+        }
+    }
     /*
      * NULL -> ident is NULL -> default id string is argv[0] (program name)
      * 0 -> no options flags set (such as LOG_PID, LOG_NDELAY, LOG_PERROR or LOG_CONS)
@@ -87,9 +93,57 @@ int main(int argc, char* argv[]){
         return -1;
     }
 
+    if (is_daemon){
+        /*
+         * Step 1: Creates a new child process which will become daemon.
+         */
+        pid_t pid = fork();
+        
+        if (pid == -1){
+            syslog(LOG_ERR, "Could not fork.");
+            close(glob_params.sockfd);
+            return -1;
+        }
+
+        if (pid != 0){ // not the child process
+            exit(0);
+        }
+
+        /*
+         * Step 2: Creates a new session to ensure no controlling tty.
+         */
+        pid_t sessionid = setsid();
+        if (sessionid == -1){
+            syslog(LOG_ERR, "Could not create new session id.");
+            close(glob_params.sockfd);
+            return -1;
+        }
+
+        /*
+         * Step 3: Change working directory
+         */
+        if (chdir("/") == -1){
+            syslog(LOG_ERR, "Could not change directory.");
+            close(glob_params.sockfd);
+            return -1;
+        }
+
+        /*
+         * Step 4: Redirect std* to /dev/null to prevent starting a terminal
+         */
+        int stdin_fd = open("/dev/null", O_RDONLY);
+        int stdouterr_fd = open("/dev/null", O_WRONLY);
+        dup2(stdin_fd, STDIN_FILENO);
+        dup2(stdouterr_fd, STDOUT_FILENO);
+        dup2(stdouterr_fd, STDERR_FILENO);
+        close(stdin_fd);
+        close(stdouterr_fd);
+    }
+
     // Listen: https://man7.org/linux/man-pages/man2/listen.2.html
     if (listen(glob_params.sockfd, MAX_CONNECTIONS) == -1){
         syslog(LOG_ERR, "Error listening to socket.");
+        close(glob_params.sockfd);
         return -1;
     }
 
@@ -120,9 +174,10 @@ int main(int argc, char* argv[]){
         // inet: https://man7.org/linux/man-pages/man3/inet.3.html
         syslog(LOG_INFO, "Accepted connection from %s\n", inet_ntoa(connect_address.sin_addr));
         printf("[%d] Accepted connection from %s\n", conn_count, inet_ntoa(connect_address.sin_addr));
+        syslog(LOG_INFO, "[%d] Identifier for accepted socket = %d\n", conn_count, glob_params.accepted_sockfd);
         printf("[%d] Identifier for accepted socket = %d\n", conn_count, glob_params.accepted_sockfd);
 
-        
+
         // Allocate space from heap:
         glob_params.buffer_ptr = malloc(BLOCK_SIZE);
         if (glob_params.buffer_ptr == NULL){
@@ -148,6 +203,8 @@ int main(int argc, char* argv[]){
 
             printf("[%d] Received %li bytes from socket %d\n",
                     conn_count, nbytes_socket, glob_params.accepted_sockfd);
+            syslog(LOG_INFO, "[%d] Received %li bytes from socket %d\n",
+                    conn_count, nbytes_socket, glob_params.accepted_sockfd);
 
             int rc_sync = fsync(glob_params.socket_file_fd);
             if (rc_sync == -1){
@@ -163,6 +220,9 @@ int main(int argc, char* argv[]){
                     printf("[%d] About to reallocate memory! ", conn_count);
                     printf("Current size = %li, ", current_buffer_size);
                     printf("New size = %li\n", current_buffer_size+BLOCK_SIZE);
+                    syslog(LOG_INFO, "[%d] About to reallocate memory! ", conn_count);
+                    syslog(LOG_INFO, "Current size = %li, ", current_buffer_size);
+                    syslog(LOG_INFO, "New size = %li\n", current_buffer_size+BLOCK_SIZE);                    
                     char* bp_temp = realloc(glob_params.buffer_ptr, current_buffer_size+BLOCK_SIZE);
                     if (bp_temp == NULL){
                         syslog(LOG_ERR, "Could not reallocate buffer space from heap. Current buffer size = %li.",
@@ -177,8 +237,8 @@ int main(int argc, char* argv[]){
         } while(got_newline == false);
 
         printf("[%d] Found end of data symbol, closing connection.\n", conn_count);
+        syslog(LOG_INFO, "[%d] Found end of data symbol, closing connection.\n", conn_count);
 
-        // send(glob_params.accepted_sockfd, glob_params.buffer_ptr, nbytes_socket, 0);
         nbytes_file = write(glob_params.socket_file_fd, glob_params.buffer_ptr,
             nbytes_socket + current_buffer_size - BLOCK_SIZE);
         if (nbytes_file == -1){
@@ -199,6 +259,7 @@ int main(int argc, char* argv[]){
                 return -1;
             }
             printf("[%d] Got %li bytes from file\n", conn_count, nbytes_file);
+            syslog(LOG_INFO, "[%d] Got %li bytes from file\n", conn_count, nbytes_file);
             send(glob_params.accepted_sockfd, glob_params.buffer_ptr,
                 nbytes_file, 0); // Send back nbytes_file to socket
         } while (nbytes_file > 0);
@@ -216,14 +277,13 @@ int main(int argc, char* argv[]){
 }
 
 void signal_handler(int signal_number){
-    syslog(LOG_INFO, "Caught signal, exiting"); // this is probably not safe, fix
+    syslog(LOG_INFO, "Caught signal, exiting");
     if (signal_number == SIGINT){
         caught_sigint = true;
     }
     if (signal_number == SIGTERM){
         caught_sigterm = true;
     }
-    printf("Caught signal, exiting\n");
     cleanup(&glob_params);
     exit(0);
 }
