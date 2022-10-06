@@ -17,13 +17,14 @@
 
 #define BIND_PORT 9000
 #define MAX_CONNECTIONS 1
-#define BUFFER_SIZE 1024
+#define BLOCK_SIZE 1024
 #define SOCKET_DATA_FILE "/var/tmp/aesdsocketdata"
 
 struct file_params{
     int sockfd;
     int accepted_sockfd;
     int socket_file_fd;
+    char* buffer_ptr;
 };
 
 struct file_params glob_params;
@@ -31,15 +32,16 @@ struct file_params glob_params;
 bool caught_sigint = false;
 bool caught_sigterm = false;
 
-char buffer[BUFFER_SIZE] = {0};
-
 void signal_handler(int signum); // https://man7.org/linux/man-pages/man2/sigaction.2.html
 void cleanup(struct file_params* fp);
 
 int main(int argc, char* argv[]){
     ssize_t nbytes_socket;
     ssize_t nbytes_file;
-    ssize_t buf_end_ptr;
+    long int current_buffer_size;
+    char* buffer_read_ptr;
+    int conn_count;
+    bool got_newline;
 
     /*
      * NULL -> ident is NULL -> default id string is argv[0] (program name)
@@ -97,7 +99,8 @@ int main(int argc, char* argv[]){
         return -1;
     }
 
-    int conn_count = 0;
+    conn_count = 0;
+    current_buffer_size = 0;
     while (1){
         // Poll: https://man7.org/linux/man-pages/man2/poll.2.html
         // struct pollfd pfd = {.fd = sockfd, .events = POLLIN}
@@ -113,70 +116,99 @@ int main(int argc, char* argv[]){
         }
 
         conn_count++;
-    
+
         // inet: https://man7.org/linux/man-pages/man3/inet.3.html
         syslog(LOG_INFO, "Accepted connection from %s\n", inet_ntoa(connect_address.sin_addr));
         printf("[%d] Accepted connection from %s\n", conn_count, inet_ntoa(connect_address.sin_addr));
         printf("[%d] Identifier for accepted socket = %d\n", conn_count, glob_params.accepted_sockfd);
 
         
-        // Recv/Send: https://man7.org/linux/man-pages/man2/recv.2.html
-        nbytes_socket = recv(glob_params.accepted_sockfd, buffer, BUFFER_SIZE, 0);
-        if (nbytes_socket == -1){
-            syslog(LOG_ERR, "Error receiving from socket %d. Exiting!\n", glob_params.accepted_sockfd);
+        // Allocate space from heap:
+        glob_params.buffer_ptr = malloc(BLOCK_SIZE);
+        if (glob_params.buffer_ptr == NULL){
+            syslog(LOG_ERR, "Could not allocate buffer space from heap. Current buffer size = %li.",
+                current_buffer_size);
+            cleanup(&glob_params);
+            return -1;
+        }
+        current_buffer_size = BLOCK_SIZE;
+
+
+        got_newline = false;
+        do{
+            // Recv/Send: https://man7.org/linux/man-pages/man2/recv.2.html
+            buffer_read_ptr = glob_params.buffer_ptr + current_buffer_size - BLOCK_SIZE;
+            // printf("[%d] Buffer read pointer = %li\n", conn_count, (long int)buffer_read_ptr);
+            nbytes_socket = recv(glob_params.accepted_sockfd, buffer_read_ptr, BLOCK_SIZE, 0);
+            if (nbytes_socket == -1){
+                syslog(LOG_ERR, "Error receiving from socket %d. Exiting!", glob_params.accepted_sockfd);
+                cleanup(&glob_params);
+                return -1;
+            }
+
+            printf("[%d] Received %li bytes from socket %d\n",
+                    conn_count, nbytes_socket, glob_params.accepted_sockfd);
+
+            int rc_sync = fsync(glob_params.socket_file_fd);
+            if (rc_sync == -1){
+                syslog(LOG_ERR, "Error with fsync");
+                cleanup(&glob_params);
+                return -1;
+            }
+            if (buffer_read_ptr[nbytes_socket-1] == '\n'){
+                got_newline = true;
+            }
+            else{
+                if (nbytes_socket == BLOCK_SIZE){ // need to allocate more heap space
+                    printf("[%d] About to reallocate memory! ", conn_count);
+                    printf("Current size = %li, ", current_buffer_size);
+                    printf("New size = %li\n", current_buffer_size+BLOCK_SIZE);
+                    char* bp_temp = realloc(glob_params.buffer_ptr, current_buffer_size+BLOCK_SIZE);
+                    if (bp_temp == NULL){
+                        syslog(LOG_ERR, "Could not reallocate buffer space from heap. Current buffer size = %li.",
+                            current_buffer_size);
+                        cleanup(&glob_params);
+                        return -1;
+                    }
+                    glob_params.buffer_ptr = bp_temp;
+                    current_buffer_size += BLOCK_SIZE;
+                }
+            }
+        } while(got_newline == false);
+
+        printf("[%d] Found end of data symbol, closing connection.\n", conn_count);
+
+        // send(glob_params.accepted_sockfd, glob_params.buffer_ptr, nbytes_socket, 0);
+        nbytes_file = write(glob_params.socket_file_fd, glob_params.buffer_ptr,
+            nbytes_socket + current_buffer_size - BLOCK_SIZE);
+        if (nbytes_file == -1){
+            syslog(LOG_ERR, "Error writing %li bytes to file %s\n", nbytes_socket, SOCKET_DATA_FILE);
+            cleanup(&glob_params);
             return -1;
         }
 
-        if (nbytes_socket > 0){
-            buf_end_ptr = nbytes_socket - 1;
-        }
+        // Read in all of file:
 
-        printf("[%d] Received %li bytes from socket %d\n",
-                conn_count, nbytes_socket, glob_params.accepted_sockfd);
+        lseek(glob_params.socket_file_fd, 0, SEEK_SET); // Go to beginning of file
+        do{
+            nbytes_file = read(glob_params.socket_file_fd, 
+                glob_params.buffer_ptr, current_buffer_size); // Read in up to current_buffer_size bytes
+            if (nbytes_file == -1){
+                syslog(LOG_ERR, "Couldn't read from file %s\n", SOCKET_DATA_FILE);
+                cleanup(&glob_params);
+                return -1;
+            }
+            printf("[%d] Got %li bytes from file\n", conn_count, nbytes_file);
+            send(glob_params.accepted_sockfd, glob_params.buffer_ptr,
+                nbytes_file, 0); // Send back nbytes_file to socket
+        } while (nbytes_file > 0);
 
-        nbytes_file = write(glob_params.socket_file_fd, buffer, nbytes_socket);
-        if (nbytes_file == -1){
-            syslog(LOG_ERR, "Error writing %li bytes to file %s\n", nbytes_socket, SOCKET_DATA_FILE);
-            // close(sockfd);
-            // close(accepted_sockfd);
-            // close(socket_file_fd);
-            // // remove(SOCKET_DATA_FILE);
-        }
+        close(glob_params.accepted_sockfd);
+        syslog(LOG_INFO, "Closed connection from %s\n", inet_ntoa(connect_address.sin_addr));
+        printf("[%d] Closed connection from %s\n", conn_count, inet_ntoa(connect_address.sin_addr));
 
-        int rc_sync = fsync(glob_params.socket_file_fd);
-        if (rc_sync == -1){
-            // Add error handling here
-            // syslog
-        }
-
-        if (buffer[buf_end_ptr] == '\n'){
-            printf("[%d] Found end of data symbol, closing connection.\n", conn_count);
-
-            // Read in all of file:
-
-            lseek(glob_params.socket_file_fd, 0, SEEK_SET); // Go to beginning of file
-            do{
-                nbytes_file = read(glob_params.socket_file_fd, buffer, BUFFER_SIZE); // Read in up to BUFFER_SIZE bytes
-                if (nbytes_file == -1){
-                    // Add error handling
-                }
-                printf("[%d] Got %li bytes from file\n", conn_count, nbytes_file);
-                send(glob_params.accepted_sockfd, buffer, nbytes_file, 0); // Send back nbytes_file to socket
-            } while (nbytes_file > 0);
-
-            close(glob_params.accepted_sockfd); // need to gracefully close from all the errors!
-            syslog(LOG_INFO, "Closed connection from %s\n", inet_ntoa(connect_address.sin_addr));
-            printf("[%d] Closed connection from %s\n", conn_count, inet_ntoa(connect_address.sin_addr));
-        }
-
-        // if (caught_sigint || caught_sigterm){
-        //     syslog(LOG_INFO, "Caught signal, exiting");
-        //     printf("Caught signal, exiting");
-        //     cleanup(&glob_params);
-        //     // if (caught_sigint) printf("Caught SIGINT. EXIT.\n");
-        //     // if (caught_sigterm) printf("Caught SIGTERM. EXIT.\n");
-        //     return 0;
-        // }
+        free(glob_params.buffer_ptr);
+        glob_params.buffer_ptr = NULL;
     }
 
     cleanup(&glob_params);
@@ -201,4 +233,7 @@ void cleanup(struct file_params* fp){
     close(fp->accepted_sockfd);
     close(fp->socket_file_fd);
     remove(SOCKET_DATA_FILE);
+    if (fp->buffer_ptr) {
+        free(fp->buffer_ptr);
+    }
 }
