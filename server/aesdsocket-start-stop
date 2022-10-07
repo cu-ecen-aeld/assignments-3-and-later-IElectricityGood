@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 # echo $(dirname $(realpath $0))/aesdsocket
 
