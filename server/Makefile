@@ -19,7 +19,8 @@ endif
 # compiler flags:
 #  -Wall turns on compiler warnings
 #  -Werror makes warnings errors
-CFLAGS  = -Wall -Werror
+#  -static: https://stackoverflow.com/a/24607099
+CFLAGS  = -Wall -Werror -static
 
 # built executable:
 TARGET = aesdsocket
